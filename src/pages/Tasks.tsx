@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import {
   Plus,
   Search,
@@ -10,7 +11,9 @@ import {
   Pencil,
 } from 'lucide-react'
 import { supabase } from '../lib/supabase'
-import { useAuth } from '../context/AuthContext'
+import { useAuth } from '../context/useAuth'
+import { createWorkspaceNotification } from '../lib/notifications'
+import { parseDateKey } from '../lib/date-utils'
 
 type TaskStatus = 'To do' | 'In progress' | 'Completed'
 type TaskPriority = 'Low' | 'Medium' | 'High'
@@ -28,36 +31,14 @@ type Task = {
   status: TaskStatus
   priority: TaskPriority
   due: string
-}
-
-const initialTasks: Omit<Task, 'id' | 'project_id'>[] = [
-  { title: 'Finalize homepage design', project: 'Website Redesign', status: 'In progress', priority: 'High', due: 'Nov 14, 2026' },
-  { title: 'Review mobile layouts', project: 'Mobile Application', status: 'To do', priority: 'Medium', due: 'Nov 16, 2026' },
-  { title: 'Prepare launch checklist', project: 'Marketing Campaign', status: 'To do', priority: 'High', due: 'Nov 18, 2026' },
-  { title: 'Fix navigation issues', project: 'Customer Portal', status: 'Completed', priority: 'Medium', due: 'Nov 10, 2026' },
-  { title: 'Approve brand direction', project: 'Brand Identity', status: 'Completed', priority: 'Low', due: 'Nov 08, 2026' },
-]
-
-async function createTaskNotification(
-  userId: string,
-  title: string,
-  message: string
-) {
-  const { error } = await supabase.from('notifications').insert({
-    user_id: userId,
-    title,
-    message,
-    type: 'task',
-    link: '/tasks',
-  })
-
-  if (error) {
-    console.error('Could not create notification:', error.message)
-  }
+  description: string
+  completed_at: string | null
+  created_at?: string
 }
 
 function Tasks() {
   const { user, loading: authLoading } = useAuth()
+  const [searchParams, setSearchParams] = useSearchParams()
 
   const [tasks, setTasks] = useState<Task[]>([])
   const [projects, setProjects] = useState<ProjectOption[]>([])
@@ -65,13 +46,14 @@ function Tasks() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
-  const [search, setSearch] = useState('')
   const [filter, setFilter] = useState('All')
+  const [sortBy, setSortBy] = useState<'recent' | 'due' | 'priority'>('recent')
   const [showForm, setShowForm] = useState(false)
   const [newTitle, setNewTitle] = useState('')
   const [newProjectId, setNewProjectId] = useState('')
   const [newPriority, setNewPriority] = useState<TaskPriority>('Medium')
   const [newDue, setNewDue] = useState('')
+  const [newDescription, setNewDescription] = useState('')
 
   const [editingTaskId, setEditingTaskId] = useState<number | null>(null)
   const [editTitle, setEditTitle] = useState('')
@@ -79,15 +61,13 @@ function Tasks() {
   const [editPriority, setEditPriority] = useState<TaskPriority>('Medium')
   const [editStatus, setEditStatus] = useState<TaskStatus>('To do')
   const [editDue, setEditDue] = useState('')
+  const [editDescription, setEditDescription] = useState('')
+  const search = searchParams.get('search') ?? ''
 
   useEffect(() => {
     if (authLoading) return
 
-    if (!user) {
-      setTasks([])
-      setLoading(false)
-      return
-    }
+    if (!user) return
 
     const currentUser = user
     let cancelled = false
@@ -106,9 +86,9 @@ function Tasks() {
 
       if (projectError) {
         setError(projectError.message)
-      } else {
-        setProjects((projectData || []) as ProjectOption[])
       }
+      const availableProjects = (projectData ?? []) as ProjectOption[]
+      setProjects(availableProjects)
 
       const { data, error: fetchError } = await supabase
         .from('tasks')
@@ -130,49 +110,19 @@ function Tasks() {
         return
       }
 
-      // Import existing local tasks once, if the cloud table is empty.
-      let oldTasks: Task[] = []
-
-      try {
-        const saved = localStorage.getItem('devboard-tasks')
-        oldTasks = saved ? JSON.parse(saved) as Task[] : []
-      } catch {
-        oldTasks = []
-      }
-
-      const tasksToImport = oldTasks.length > 0
-        ? oldTasks
-        : initialTasks
-
-      const { data: imported, error: importError } = await supabase
-        .from('tasks')
-        .insert(
-          tasksToImport.map(task => ({
-            user_id: currentUser.id,
-            project_id: projects.find(
-              project => project.name.trim() === task.project.trim()
-            )?.id ?? null,
-            title: task.title,
-            project: task.project,
-            status: task.status,
-            priority: task.priority,
-            due: task.due,
-          }))
-        )
-        .select()
-
-      if (cancelled) return
-
-      if (importError) {
-        setError(importError.message)
-      } else {
-        setTasks((imported || []) as Task[])
-      }
-
+      setTasks([])
       setLoading(false)
     }
 
-    loadTasks()
+    void loadTasks().catch((loadError: unknown) => {
+      if (cancelled) return
+      setError(
+        loadError instanceof Error
+          ? loadError.message
+          : 'Could not load tasks.'
+      )
+      setLoading(false)
+    })
 
     return () => {
       cancelled = true
@@ -183,13 +133,27 @@ function Tasks() {
     return tasks.filter(task => {
       const matchesSearch =
         task.title.toLowerCase().includes(search.toLowerCase()) ||
-        task.project.toLowerCase().includes(search.toLowerCase())
+        task.project.toLowerCase().includes(search.toLowerCase()) ||
+        (task.description ?? '').toLowerCase().includes(search.toLowerCase())
 
       const matchesFilter = filter === 'All' || task.status === filter
+      const selectedProjectId = searchParams.get('project')
+      const matchesProject = !selectedProjectId || String(task.project_id) === selectedProjectId
 
-      return matchesSearch && matchesFilter
+      return matchesSearch && matchesFilter && matchesProject
+    }).sort((a, b) => {
+      if (sortBy === 'priority') {
+        const rank = { High: 0, Medium: 1, Low: 2 }
+        return rank[a.priority] - rank[b.priority]
+      }
+      if (sortBy === 'due') {
+        return (parseDateKey(a.due) ?? '9999-12-31').localeCompare(
+          parseDateKey(b.due) ?? '9999-12-31'
+        )
+      }
+      return (b.created_at ?? '').localeCompare(a.created_at ?? '')
     })
-  }, [tasks, search, filter])
+  }, [tasks, search, filter, searchParams, sortBy])
 
   async function addTask() {
     if (!newTitle.trim() || !user || saving) return
@@ -211,6 +175,8 @@ function Tasks() {
         status: 'To do',
         priority: newPriority,
         due: newDue || 'Not scheduled',
+        description: newDescription.trim(),
+        completed_at: null,
       })
       .select()
       .single()
@@ -219,15 +185,19 @@ function Tasks() {
       setError(insertError.message)
     } else {
       setTasks(current => [data as Task, ...current])
-      await createTaskNotification(
-        user.id,
-        'New task created',
-        `You created "${data.title}" in ${data.project || 'General'}.`
-      )
+      const notificationError = await createWorkspaceNotification({
+        userId: user.id,
+        title: 'New task created',
+        message: `You created "${data.title}" in ${data.project || 'General'}.`,
+        type: 'task',
+        link: '/tasks',
+      })
+      if (notificationError) setError(`Task saved, but its notification could not be saved: ${notificationError}`)
       setNewTitle('')
       setNewProjectId('')
       setNewPriority('Medium')
       setNewDue('')
+      setNewDescription('')
       setShowForm(false)
     }
 
@@ -245,7 +215,8 @@ function Tasks() {
     setEditProjectId(linkedProject ? String(linkedProject.id) : '')
     setEditPriority(task.priority)
     setEditStatus(task.status)
-    setEditDue(task.due)
+    setEditDue(parseDateKey(task.due) ?? '')
+    setEditDescription(task.description ?? '')
     setError('')
   }
 
@@ -256,6 +227,7 @@ function Tasks() {
     setEditPriority('Medium')
     setEditStatus('To do')
     setEditDue('')
+    setEditDescription('')
   }
 
   async function saveTaskEdit() {
@@ -278,6 +250,12 @@ function Tasks() {
       priority: editPriority,
       status: editStatus,
       due: editDue.trim() || 'Not scheduled',
+      description: editDescription.trim(),
+      completed_at: editStatus === 'Completed'
+        ? task.status === 'Completed'
+          ? task.completed_at
+          : new Date().toISOString()
+        : null,
     }
 
     const { error: updateError } = await supabase
@@ -295,11 +273,14 @@ function Tasks() {
         )
       )
 
-      await createTaskNotification(
-        user.id,
-        'Task updated',
-        `"${updates.title}" was updated successfully.`
-      )
+      const notificationError = await createWorkspaceNotification({
+        userId: user.id,
+        title: 'Task updated',
+        message: `"${updates.title}" was updated successfully.`,
+        type: 'task',
+        link: '/tasks',
+      })
+      if (notificationError) setError(`Task saved, but its notification could not be saved: ${notificationError}`)
 
       cancelEditing()
     }
@@ -315,13 +296,17 @@ function Tasks() {
 
     const nextStatus: TaskStatus =
       task.status === 'Completed' ? 'To do' : 'Completed'
+    const completedAt = nextStatus === 'Completed' ? new Date().toISOString() : null
 
     setSaving(true)
     setError('')
 
     const { error: updateError } = await supabase
       .from('tasks')
-      .update({ status: nextStatus })
+      .update({
+        status: nextStatus,
+        completed_at: completedAt,
+      })
       .eq('id', id)
       .eq('user_id', user.id)
 
@@ -330,14 +315,23 @@ function Tasks() {
     } else {
       setTasks(current =>
         current.map(item =>
-          item.id === id ? { ...item, status: nextStatus } : item
+          item.id === id
+            ? {
+                ...item,
+                status: nextStatus,
+                completed_at: completedAt,
+              }
+            : item
         )
       )
-      await createTaskNotification(
-        user.id,
-        nextStatus === 'Completed' ? 'Task completed' : 'Task reopened',
-        `"${task.title}" was marked as ${nextStatus.toLowerCase()}.`
-      )
+      const notificationError = await createWorkspaceNotification({
+        userId: user.id,
+        title: nextStatus === 'Completed' ? 'Task completed' : 'Task reopened',
+        message: `"${task.title}" was marked as ${nextStatus.toLowerCase()}.`,
+        type: 'task',
+        link: '/tasks',
+      })
+      if (notificationError) setError(`Task saved, but its notification could not be saved: ${notificationError}`)
     }
 
     setSaving(false)
@@ -362,11 +356,14 @@ function Tasks() {
       setTasks(current => current.filter(task => task.id !== id))
 
       if (deletedTask) {
-        await createTaskNotification(
-          user.id,
-          'Task deleted',
-          `"${deletedTask.title}" was removed from your tasks.`
-        )
+        const notificationError = await createWorkspaceNotification({
+          userId: user.id,
+          title: 'Task deleted',
+          message: `"${deletedTask.title}" was removed from your tasks.`,
+          type: 'task',
+          link: '/tasks',
+        })
+        if (notificationError) setError(`Task deleted, but its notification could not be saved: ${notificationError}`)
       }
     }
 
@@ -425,12 +422,14 @@ function Tasks() {
           }}
         >
           <input
+            aria-label="Task title"
             value={newTitle}
             onChange={event => setNewTitle(event.target.value)}
             placeholder="What needs to be done?"
             required
           />
           <select
+            aria-label="Project"
             value={newProjectId}
             onChange={event => setNewProjectId(event.target.value)}
           >
@@ -442,6 +441,7 @@ function Tasks() {
             ))}
           </select>
           <select
+            aria-label="Priority"
             value={newPriority}
             onChange={event => setNewPriority(event.target.value as TaskPriority)}
           >
@@ -454,6 +454,13 @@ function Tasks() {
             value={newDue}
             onChange={event => setNewDue(event.target.value)}
             aria-label="Due date"
+          />
+          <textarea
+            aria-label="Task description"
+            value={newDescription}
+            onChange={event => setNewDescription(event.target.value)}
+            placeholder="Task details (optional)"
+            rows={2}
           />
           <button type="submit" disabled={saving}>
             {saving ? 'Saving...' : 'Create task'}
@@ -516,10 +523,17 @@ function Tasks() {
           </select>
 
           <input
-            type="text"
+            type="date"
+            aria-label="Due date"
             value={editDue}
             onChange={event => setEditDue(event.target.value)}
-            placeholder="Due date"
+          />
+          <textarea
+            aria-label="Task description"
+            value={editDescription}
+            onChange={event => setEditDescription(event.target.value)}
+            placeholder="Task details (optional)"
+            rows={2}
           />
 
           <button type="submit" disabled={saving}>
@@ -542,8 +556,14 @@ function Tasks() {
           <div className="workspace-search">
             <Search size={17} />
             <input
+              aria-label="Search tasks"
               value={search}
-              onChange={event => setSearch(event.target.value)}
+              onChange={event => {
+                const nextParams = new URLSearchParams(searchParams)
+                if (event.target.value) nextParams.set('search', event.target.value)
+                else nextParams.delete('search')
+                setSearchParams(nextParams, { replace: true })
+              }}
               placeholder="Search tasks or projects..."
             />
           </div>
@@ -559,6 +579,14 @@ function Tasks() {
               </button>
             ))}
           </div>
+          <label className="workspace-sort">
+            <span>Sort by</span>
+            <select value={sortBy} onChange={event => setSortBy(event.target.value as typeof sortBy)}>
+              <option value="recent">Recently created</option>
+              <option value="due">Due date</option>
+              <option value="priority">Priority</option>
+            </select>
+          </label>
         </div>
 
         <div className="task-list">
@@ -584,7 +612,10 @@ function Tasks() {
                   <strong className={task.status === 'Completed' ? 'task-title-complete' : ''}>
                     {task.title}
                   </strong>
-                  <span>{task.project}</span>
+                  {task.description && <span>{task.description}</span>}
+                  <span>
+                    {projects.find(project => project.id === task.project_id)?.name ?? task.project ?? 'General'}
+                  </span>
                 </div>
 
                 <span className={`task-priority priority-${task.priority.toLowerCase()}`}>

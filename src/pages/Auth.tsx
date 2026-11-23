@@ -1,10 +1,12 @@
 import { useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Eye, EyeOff, ShieldCheck } from 'lucide-react'
-import { supabase } from '../lib/supabase'
+import { supabase, supabaseConfigured, supabaseConfigError } from '../lib/supabase'
+import { useAuth } from '../context/useAuth'
 
 function Auth() {
   const navigate = useNavigate()
+  const { error: authError } = useAuth()
   const [mode, setMode] = useState<'login' | 'signup'>('login')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -15,6 +17,10 @@ function Auth() {
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (!supabaseConfigured) {
+      setError(supabaseConfigError)
+      return
+    }
     setError('')
     setMessage('')
     setLoading(true)
@@ -113,7 +119,7 @@ function Auth() {
               value={password}
               onChange={event => setPassword(event.target.value)}
               autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
-              minLength={6}
+              minLength={mode === 'signup' ? 8 : undefined}
               required
             />
             <button
@@ -125,12 +131,20 @@ function Auth() {
             </button>
           </div>
 
-          {error && <div className="auth-error">{error}</div>}
+          {(error || authError) && (
+            <div className="auth-error" role="alert">{error || authError}</div>
+          )}
           {message && <div className="auth-message">{message}</div>}
 
-          <button className="auth-submit" type="submit" disabled={loading}>
+          <button
+            className="auth-submit"
+            type="submit"
+            disabled={loading || !supabaseConfigured}
+          >
             {loading
               ? 'Please wait...'
+              : !supabaseConfigured
+                ? 'Configuration required'
               : mode === 'login'
                 ? 'Sign in to DevBoard'
                 : 'Create account'}
@@ -138,7 +152,9 @@ function Auth() {
         </form>
 
         <p className="auth-footer">
-          Secure workspace access · Powered by Supabase
+          {supabaseConfigured
+            ? 'Secure workspace access · Powered by Supabase'
+            : 'Configure Supabase to enable account access.'}
         </p>
       </section>
     </main>

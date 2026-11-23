@@ -1,4 +1,5 @@
 import { NavLink } from 'react-router-dom'
+import { useAuth } from '../context/useAuth'
 import {
   LayoutDashboard,
   FolderKanban,
@@ -21,6 +22,17 @@ const navigation = [
 ]
 
 function Sidebar() {
+  const { user } = useAuth()
+  const displayName = String(
+    user?.user_metadata?.full_name || user?.email?.split('@')[0] || 'Workspace member'
+  )
+  const initials = displayName
+    .split(/\s+/)
+    .map(part => part[0])
+    .join('')
+    .slice(0, 2)
+    .toUpperCase()
+
   return (
     <aside className="sidebar">
       <div className="sidebar-brand">
@@ -32,7 +44,7 @@ function Sidebar() {
 
       <div className="sidebar-section-label">WORKSPACE</div>
 
-      <nav className="sidebar-nav">
+      <nav className="sidebar-nav" aria-label="Workspace">
         {navigation.map(({ label, path, icon: Icon }) => (
           <NavLink
             key={path}
@@ -49,10 +61,10 @@ function Sidebar() {
       </nav>
 
       <div className="sidebar-footer">
-        <div className="user-avatar">W</div>
+        <div className="user-avatar" aria-hidden="true">{initials}</div>
         <div className="user-details">
-          <strong>Workspace Admin</strong>
-          <span>Administrator</span>
+          <strong>{displayName}</strong>
+          <span>{user?.email || 'Workspace member'}</span>
         </div>
       </div>
     </aside>

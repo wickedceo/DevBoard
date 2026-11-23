@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   ArrowUpRight,
   BriefcaseBusiness,
@@ -8,9 +9,12 @@ import {
   Plus,
   CalendarDays,
   Activity,
+  Bell,
 } from 'lucide-react'
 import { supabase } from '../lib/supabase'
-import { useAuth } from '../context/AuthContext'
+import { useAuth } from '../context/useAuth'
+import { calculateDashboardMetrics, getCompletionTrend } from '../lib/dashboard-metrics'
+import { getLocalDateKey, isDateBeforeToday, parseDateKey } from '../lib/date-utils'
 
 type Project = {
   id: number
@@ -20,41 +24,41 @@ type Project = {
   status: string
   due: string
   created_at: string
+  archived_at: string | null
 }
 
 type Task = {
   id: number
+  project_id: number | null
   title: string
   project: string
   status: string
   priority: string
   due: string
   created_at: string
+  completed_at: string | null
 }
 
-type Member = {
+type ActivityNotification = {
   id: number
-  name: string
+  title: string
+  message: string
+  type: string
   created_at: string
 }
 
 function formatDeadline(value: string) {
-  if (!value || value === 'Not scheduled') return 'Not scheduled'
-
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-
+  const dateKey = parseDateKey(value)
+  if (!dateKey) return 'Not scheduled'
+  const date = new Date(`${dateKey}T00:00:00`)
   const today = new Date()
   today.setHours(0, 0, 0, 0)
 
   const tomorrow = new Date(today)
   tomorrow.setDate(tomorrow.getDate() + 1)
 
-  const target = new Date(date)
-  target.setHours(0, 0, 0, 0)
-
-  if (target.getTime() === today.getTime()) return 'Today'
-  if (target.getTime() === tomorrow.getTime()) return 'Tomorrow'
+  if (dateKey === getLocalDateKey(today)) return 'Today'
+  if (dateKey === getLocalDateKey(tomorrow)) return 'Tomorrow'
 
   return date.toLocaleDateString('en-US', {
     month: 'short',
@@ -81,19 +85,19 @@ function timeAgo(value: string) {
 
 function Dashboard() {
   const { user } = useAuth()
+  const navigate = useNavigate()
+  const [now] = useState(() => Date.now())
 
   const [projects, setProjects] = useState<Project[]>([])
   const [tasks, setTasks] = useState<Task[]>([])
-  const [members, setMembers] = useState<Member[]>([])
+  const [directoryCount, setDirectoryCount] = useState(0)
+  const [recentActivity, setRecentActivity] = useState<ActivityNotification[]>([])
   const [fullName, setFullName] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
   useEffect(() => {
-    if (!user) {
-      setLoading(false)
-      return
-    }
+    if (!user) return
 
     const currentUser = user
     let active = true
@@ -102,31 +106,37 @@ function Dashboard() {
       setLoading(true)
       setError('')
 
-      const [projectResult, taskResult, memberResult, settingsResult] =
+      const [projectResult, taskResult, memberResult, settingsResult, activityResult] =
         await Promise.all([
           supabase
             .from('projects')
-            .select('id,name,category,progress,status,due,created_at')
+            .select('id,name,category,progress,status,due,created_at,archived_at')
             .eq('user_id', currentUser.id)
             .order('created_at', { ascending: false }),
 
           supabase
             .from('tasks')
-            .select('id,title,project,status,priority,due,created_at')
-            .eq('user_id', currentUser.id)
-            .order('created_at', { ascending: false }),
+              .select('id,project_id,title,project,status,priority,due,created_at,completed_at')
+              .eq('user_id', currentUser.id)
+              .order('created_at', { ascending: false }),
 
           supabase
             .from('team_members')
-            .select('id,name,created_at')
-            .eq('user_id', currentUser.id)
-            .order('created_at', { ascending: false }),
+            .select('id', { count: 'exact', head: true })
+            .eq('user_id', currentUser.id),
 
           supabase
             .from('user_settings')
             .select('full_name')
             .eq('user_id', currentUser.id)
             .maybeSingle(),
+
+          supabase
+            .from('notifications')
+            .select('id,title,message,type,created_at')
+            .eq('user_id', currentUser.id)
+            .order('created_at', { ascending: false })
+            .limit(5),
         ])
 
       if (!active) return
@@ -135,7 +145,8 @@ function Dashboard() {
         projectResult.error ||
         taskResult.error ||
         memberResult.error ||
-        settingsResult.error
+        settingsResult.error ||
+        activityResult.error
 
       if (failed) {
         setError(failed.message)
@@ -145,7 +156,8 @@ function Dashboard() {
 
       setProjects((projectResult.data ?? []) as Project[])
       setTasks((taskResult.data ?? []) as Task[])
-      setMembers((memberResult.data ?? []) as Member[])
+      setDirectoryCount(memberResult.count ?? 0)
+      setRecentActivity((activityResult.data ?? []) as ActivityNotification[])
 
       setFullName(
         settingsResult.data?.full_name ||
@@ -157,104 +169,42 @@ function Dashboard() {
       setLoading(false)
     }
 
-    loadDashboard()
+    void loadDashboard().catch((loadError: unknown) => {
+      if (!active) return
+      setError(
+        loadError instanceof Error
+          ? loadError.message
+          : 'Could not load dashboard data.'
+      )
+      setLoading(false)
+    })
 
     return () => {
       active = false
     }
   }, [user])
 
-  const activeProjects = projects.filter(
-    project => project.status.toLowerCase() !== 'completed'
-  )
-
-  const completedTasks = tasks.filter(
-    task => task.status === 'Completed'
-  )
-
-  const overdueTasks = tasks.filter(task => {
-    if (
-      task.status === 'Completed' ||
-      !task.due ||
-      task.due === 'Not scheduled'
-    ) return false
-
-    const dueDate = new Date(task.due)
-    if (Number.isNaN(dueDate.getTime())) return false
-
-    dueDate.setHours(23, 59, 59, 999)
-    return dueDate.getTime() < Date.now()
-  })
+  const metrics = calculateDashboardMetrics(projects, tasks, new Date(now))
+  const completionTrend = getCompletionTrend(tasks, new Date(now))
+  const trendMaximum = Math.max(1, ...completionTrend.map(day => day.count))
+  const trendPoints = completionTrend.map((day, index) => {
+    const x = 26 + index * 108
+    const y = 124 - (day.count / trendMaximum) * 90
+    return `${x},${y}`
+  }).join(' ')
 
   const upcomingDeadlines = tasks
     .filter(task => {
-      if (
-        task.status === 'Completed' ||
-        !task.due ||
-        task.due === 'Not scheduled'
-      ) return false
-
-      const dueDate = new Date(task.due)
-      return !Number.isNaN(dueDate.getTime())
+      return task.status !== 'Completed' &&
+        task.due !== 'Not scheduled' &&
+        parseDateKey(task.due) !== null &&
+        !isDateBeforeToday(task.due, new Date(now))
     })
     .sort(
       (a, b) =>
-        new Date(a.due).getTime() - new Date(b.due).getTime()
+        (parseDateKey(a.due) ?? '').localeCompare(parseDateKey(b.due) ?? '')
     )
     .slice(0, 3)
-
-  const recentActivity = [
-    ...tasks.map(task => ({
-      id: `task-${task.id}`,
-      name: fullName || 'You',
-      initials: (fullName || 'You')
-        .split(' ')
-        .map(part => part[0])
-        .join('')
-        .slice(0, 2)
-        .toUpperCase(),
-      action:
-        task.status === 'Completed'
-          ? 'completed a task'
-          : 'created a task',
-      target: task.title,
-      time: task.created_at,
-      type: 'task',
-    })),
-    ...projects.map(project => ({
-      id: `project-${project.id}`,
-      name: fullName || 'You',
-      initials: (fullName || 'You')
-        .split(' ')
-        .map(part => part[0])
-        .join('')
-        .slice(0, 2)
-        .toUpperCase(),
-      action: 'created a project',
-      target: project.name,
-      time: project.created_at,
-      type: 'project',
-    })),
-    ...members.map(member => ({
-      id: `member-${member.id}`,
-      name: fullName || 'You',
-      initials: (fullName || 'You')
-        .split(' ')
-        .map(part => part[0])
-        .join('')
-        .slice(0, 2)
-        .toUpperCase(),
-      action: 'added a team member',
-      target: member.name,
-      time: member.created_at,
-      type: 'member',
-    })),
-  ]
-    .sort(
-      (a, b) =>
-        new Date(b.time).getTime() - new Date(a.time).getTime()
-    )
-    .slice(0, 5)
 
   return (
     <div className="dashboard">
@@ -266,7 +216,7 @@ function Dashboard() {
         </div>
         <button
           className="dashboard-create"
-          onClick={() => window.location.assign('/projects')}
+          onClick={() => navigate('/projects?create=1')}
         >
           <Plus size={16} />
           New project
@@ -281,30 +231,15 @@ function Dashboard() {
 
       <section className="stats-grid">
         {[
-          {
-            label: 'Active projects',
-            value: activeProjects.length,
-            change: `${projects.length} total projects`,
-            icon: BriefcaseBusiness,
-          },
-          {
-            label: 'Completed tasks',
-            value: completedTasks.length,
-            change: `${tasks.length} total tasks`,
-            icon: CheckCircle2,
-          },
-          {
-            label: 'Overdue tasks',
-            value: overdueTasks.length,
-            change: overdueTasks.length ? 'Needs attention' : 'All clear',
-            icon: Clock3,
-          },
-          {
-            label: 'Team members',
-            value: members.length,
-            change: 'Workspace members',
-            icon: Users,
-          },
+          { label: 'Total projects', value: metrics.totalProjects, change: `${metrics.activeProjects} active`, icon: BriefcaseBusiness },
+          { label: 'Active projects', value: metrics.activeProjects, change: 'Excludes completed and archived', icon: BriefcaseBusiness },
+          { label: 'Completed projects', value: metrics.completedProjects, change: 'Completed status', icon: CheckCircle2 },
+          { label: 'Total tasks', value: metrics.totalTasks, change: `${metrics.pendingTasks} pending`, icon: CheckCircle2 },
+          { label: 'Completed tasks', value: metrics.completedTasks, change: 'Completed status', icon: CheckCircle2 },
+          { label: 'Pending tasks', value: metrics.pendingTasks, change: 'Not completed', icon: Clock3 },
+          { label: 'Overdue tasks', value: metrics.overdueTasks, change: metrics.overdueTasks ? 'Needs attention' : 'All clear', icon: Clock3 },
+          { label: 'Task completion', value: metrics.completionRate === null ? '—' : `${metrics.completionRate}%`, change: metrics.completionRate === null ? 'No tasks yet' : 'Completed / total tasks', icon: Activity },
+          { label: 'Team directory records', value: directoryCount, change: 'Contacts, not account memberships', icon: Users },
         ].map(stat => {
           const Icon = stat.icon
 
@@ -334,7 +269,7 @@ function Dashboard() {
             </div>
             <button
               className="subtle-button"
-              onClick={() => window.location.assign('/projects')}
+              onClick={() => navigate('/projects')}
             >
               View all <ArrowUpRight size={14} />
             </button>
@@ -343,11 +278,21 @@ function Dashboard() {
           <div className="project-list">
             {loading ? (
               <p className="dashboard-empty">Loading projects...</p>
-            ) : projects.length === 0 ? (
+            ) : projects.filter(project => !project.archived_at && project.status !== 'Archived').length === 0 ? (
               <p className="dashboard-empty">No projects yet. Create your first project to get started.</p>
             ) : (
-              projects.slice(0, 4).map((project, index) => {
-                const colors = ['#c6a76a', '#8b9ed1', '#b58bd4', '#6eb9a2']
+              projects
+                .filter(project => !project.archived_at && project.status !== 'Archived')
+                .slice(0, 4)
+                .map(project => {
+                const projectTasks = tasks.filter(task => task.project_id === project.id)
+                const progress = projectTasks.length
+                  ? Math.round(
+                      projectTasks.filter(task => task.status === 'Completed').length /
+                        projectTasks.length *
+                        100
+                    )
+                  : 0
 
                 return (
                   <div className="project-row" key={project.id}>
@@ -360,19 +305,16 @@ function Dashboard() {
                     <div className="progress-track">
                       <div
                         className="progress-fill"
-                        style={{
-                          width: `${project.progress}%`,
-                          background: colors[index % colors.length],
-                        }}
+                        style={{ width: `${progress}%` }}
                       />
                     </div>
                     <div className="progress-meta">
                       <span>{project.status}</span>
-                      <strong>{project.progress}%</strong>
+                      <strong>{progress}%</strong>
                     </div>
                   </div>
                 )
-              })
+                })
             )}
           </div>
         </article>
@@ -412,18 +354,64 @@ function Dashboard() {
 
           <button
             className="view-tasks"
-            onClick={() => window.location.assign('/tasks')}
+            onClick={() => navigate('/tasks')}
           >
             View all tasks <ArrowUpRight size={14} />
           </button>
         </article>
       </section>
 
+      <section className="panel completion-trend-panel">
+        <div className="panel-heading">
+          <div>
+            <h2>Task completion trend</h2>
+            <p>Tasks completed each day over the last seven days.</p>
+          </div>
+          <Activity size={18} className="heading-icon" />
+        </div>
+        {loading ? (
+          <p className="dashboard-empty">Loading completion history...</p>
+        ) : completionTrend.every(day => day.count === 0) ? (
+          <p className="dashboard-empty">
+            No completion history recorded yet. Completion tracking starts when you complete tasks.
+          </p>
+        ) : (
+          <div className="completion-trend-chart">
+            <svg
+              viewBox="0 0 700 150"
+              role="img"
+              aria-label={`Task completions over the last seven days: ${completionTrend.map(day => `${day.label} ${day.count}`).join(', ')}`}
+            >
+              <line x1="20" y1="126" x2="680" y2="126" className="trend-axis" />
+              <polyline points={trendPoints} className="trend-line" />
+              {completionTrend.map((day, index) => {
+                const x = 26 + index * 108
+                const y = 124 - (day.count / trendMaximum) * 90
+                return (
+                  <circle
+                    key={day.key}
+                    cx={x}
+                    cy={y}
+                    r="4"
+                    className="trend-point"
+                  />
+                )
+              })}
+            </svg>
+            <div className="trend-labels" aria-hidden="true">
+              {completionTrend.map(day => (
+                <span key={day.key}>{day.label}<strong>{day.count}</strong></span>
+              ))}
+            </div>
+          </div>
+        )}
+      </section>
+
       <section className="panel activity-panel">
         <div className="panel-heading">
           <div>
             <h2>Recent activity</h2>
-            <p>The latest updates from your workspace.</p>
+            <p>Persisted notifications from supported workspace actions.</p>
           </div>
           <Activity size={18} className="heading-icon" />
         </div>
@@ -436,11 +424,14 @@ function Dashboard() {
           ) : (
             recentActivity.map(item => (
               <div className="activity-item" key={item.id}>
-                <div className="activity-avatar">{item.initials}</div>
-                <div className="activity-description">
-                  <strong>{item.name}</strong> {item.action} <b>{item.target}</b>
+                <div className="activity-avatar" aria-hidden="true">
+                  {item.type === 'task' ? <CheckCircle2 size={16} /> : item.type === 'project' ? <BriefcaseBusiness size={16} /> : item.type === 'deadline' ? <Clock3 size={16} /> : <Bell size={16} />}
                 </div>
-                <span className="activity-time">{timeAgo(item.time)}</span>
+                <div className="activity-description">
+                  <strong>{item.title}</strong>
+                  <b>{item.message}</b>
+                </div>
+                <span className="activity-time">{timeAgo(item.created_at)}</span>
               </div>
             ))
           )}

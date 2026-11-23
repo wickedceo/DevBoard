@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Plus, Search, FolderKanban, CalendarDays, Pencil, Trash2, Save, X } from 'lucide-react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
+import { Plus, Search, FolderKanban, CalendarDays, Pencil, Trash2, Save, X, Archive, RotateCcw, Eye } from 'lucide-react'
 import { supabase } from '../lib/supabase'
-import { useAuth } from '../context/AuthContext'
+import { useAuth } from '../context/useAuth'
+import { createWorkspaceNotification } from '../lib/notifications'
+import { parseDateKey } from '../lib/date-utils'
 
 type Project = {
   id: number
@@ -10,28 +13,19 @@ type Project = {
   progress: number
   status: string
   due: string
+  description: string
+  archived_at: string | null
+  created_at?: string
 }
 
 function toDateInputValue(value: string) {
-  if (!value || value === 'Not scheduled') return ''
-
-  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    return value
-  }
-
-  const date = new Date(value)
-
-  if (Number.isNaN(date.getTime())) return ''
-
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-
-  return `${year}-${month}-${day}`
+  return parseDateKey(value) ?? ''
 }
 
 function Projects() {
   const { user } = useAuth()
+  const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
   const [projects, setProjects] = useState<Project[]>([])
   const [taskCounts, setTaskCounts] = useState<
     Record<number, { total: number; completed: number }>
@@ -41,15 +35,18 @@ function Projects() {
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
   const [filter, setFilter] = useState('All')
-  const [showForm, setShowForm] = useState(false)
+  const [sortBy, setSortBy] = useState<'recent' | 'name' | 'due'>('recent')
+  const [createFormOpen, setCreateFormOpen] = useState(false)
+  const showForm = createFormOpen || searchParams.get('create') === '1'
   const [newName, setNewName] = useState('')
+  const [newDescription, setNewDescription] = useState('')
   const [editingId, setEditingId] = useState<number | null>(null)
   const [editForm, setEditForm] = useState({
     name: '',
     category: '',
-    progress: 0,
     status: 'Planning',
     due: '',
+    description: '',
   })
 
   useEffect(() => {
@@ -79,42 +76,7 @@ function Projects() {
         return
       }
 
-      let rows = data ?? []
-
-      if (rows.length === 0) {
-        try {
-          const saved = localStorage.getItem('devboard-projects')
-          const localProjects = saved ? JSON.parse(saved) as Project[] : []
-
-          if (localProjects.length > 0) {
-            const migration = localProjects.map(project => ({
-              user_id: user.id,
-              name: project.name,
-              category: project.category,
-              progress: project.progress,
-              status: project.status,
-              due: project.due,
-            }))
-
-            const { data: migrated, error: migrationError } = await supabase
-              .from('projects')
-              .insert(migration)
-              .select()
-
-            if (migrationError) {
-              setError(`Could not migrate your existing projects: ${migrationError.message}`)
-              setLoading(false)
-              return
-            }
-
-            rows = migrated ?? []
-          }
-        } catch {
-          setError('Could not read your locally saved projects.')
-          setLoading(false)
-          return
-        }
-      }
+      const rows = data ?? []
 
       const { data: taskData, error: taskFetchError } = await supabase
         .from('tasks')
@@ -161,7 +123,15 @@ function Projects() {
       }
     }
 
-    loadProjects()
+    void loadProjects().catch((loadError: unknown) => {
+      if (cancelled) return
+      setError(
+        loadError instanceof Error
+          ? loadError.message
+          : 'Could not load projects.'
+      )
+      setLoading(false)
+    })
 
     return () => {
       cancelled = true
@@ -169,10 +139,33 @@ function Projects() {
   }, [user])
 
   const filtered = useMemo(() => projects.filter(project => {
-    const matchesSearch = project.name.toLowerCase().includes(search.toLowerCase())
-    const matchesFilter = filter === 'All' || project.status === filter
+    const matchesSearch =
+      project.name.toLowerCase().includes(search.toLowerCase()) ||
+      (project.description ?? '').toLowerCase().includes(search.toLowerCase())
+    const archived = Boolean(project.archived_at) || project.status === 'Archived'
+    const matchesFilter =
+      filter === 'Archived'
+        ? archived
+        : !archived && (filter === 'All' || project.status === filter)
     return matchesSearch && matchesFilter
-  }), [projects, search, filter])
+  }).sort((a, b) => {
+    if (sortBy === 'name') return a.name.localeCompare(b.name)
+    if (sortBy === 'due') {
+      return (parseDateKey(a.due) ?? '9999-12-31').localeCompare(
+        parseDateKey(b.due) ?? '9999-12-31'
+      )
+    }
+    return (b.created_at ?? '').localeCompare(a.created_at ?? '')
+  }), [projects, search, filter, sortBy])
+
+  function closeCreateForm() {
+    setCreateFormOpen(false)
+    if (searchParams.has('create')) {
+      const nextParams = new URLSearchParams(searchParams)
+      nextParams.delete('create')
+      setSearchParams(nextParams, { replace: true })
+    }
+  }
 
   async function addProject() {
     if (!newName.trim() || !user || saving) return
@@ -189,6 +182,8 @@ function Projects() {
         progress: 0,
         status: 'Planning',
         due: 'Not scheduled',
+        description: newDescription.trim(),
+        archived_at: null,
       })
       .select()
       .single()
@@ -198,21 +193,17 @@ function Projects() {
     } else if (data) {
       setProjects(current => [data, ...current])
       setNewName('')
-      setShowForm(false)
+      setNewDescription('')
+      closeCreateForm()
 
-      const { error: notificationError } = await supabase
-        .from('notifications')
-        .insert({
-          user_id: user.id,
-          title: 'New project created',
-          message: `${data.name} has been added to your workspace.`,
-          type: 'project',
-          link: '/projects',
-        })
-
-      if (notificationError) {
-        console.error('Project notification failed:', notificationError.message)
-      }
+      const notificationError = await createWorkspaceNotification({
+        userId: user.id,
+        title: 'New project created',
+        message: `${data.name} has been added to your workspace.`,
+        type: 'project',
+        link: '/projects',
+      })
+      if (notificationError) setError(`Project saved, but its notification could not be saved: ${notificationError}`)
     }
 
     setSaving(false)
@@ -223,9 +214,9 @@ function Projects() {
     setEditForm({
       name: project.name,
       category: project.category,
-      progress: project.progress,
       status: project.status,
       due: toDateInputValue(project.due),
+      description: project.description ?? '',
     })
     setError('')
   }
@@ -241,8 +232,9 @@ function Projects() {
       .update({
         name: editForm.name.trim(),
         category: editForm.category.trim() || 'General',
-                status: editForm.status,
+        status: editForm.status,
         due: editForm.due.trim() || 'Not scheduled',
+        description: editForm.description.trim(),
       })
       .eq('id', editingId)
       .eq('user_id', user.id)
@@ -258,6 +250,47 @@ function Projects() {
           : project
       ))
       setEditingId(null)
+      const notificationError = await createWorkspaceNotification({
+        userId: user.id,
+        title: 'Project updated',
+        message: `"${data.name}" was updated.`,
+        type: 'project',
+        link: `/projects/${data.id}`,
+      })
+      if (notificationError) setError(`Project saved, but its notification could not be saved: ${notificationError}`)
+    }
+
+    setSaving(false)
+  }
+
+  async function setProjectArchived(project: Project, archived: boolean) {
+    if (!user || saving) return
+
+    setSaving(true)
+    setError('')
+
+    const archivedAt = archived ? new Date().toISOString() : null
+    const status = !archived && project.status === 'Archived' ? 'Planning' : project.status
+    const { error: updateError } = await supabase
+      .from('projects')
+      .update({ archived_at: archivedAt, status })
+      .eq('id', project.id)
+      .eq('user_id', user.id)
+
+    if (updateError) {
+      setError(updateError.message)
+    } else {
+      setProjects(current => current.map(item =>
+        item.id === project.id ? { ...item, archived_at: archivedAt, status } : item
+      ))
+      const notificationError = await createWorkspaceNotification({
+        userId: user.id,
+        title: archived ? 'Project archived' : 'Project restored',
+        message: `"${project.name}" was ${archived ? 'archived' : 'restored'}.`,
+        type: 'project',
+        link: `/projects/${project.id}`,
+      })
+      if (notificationError) setError(`Project updated, but its notification could not be saved: ${notificationError}`)
     }
 
     setSaving(false)
@@ -266,8 +299,14 @@ function Projects() {
   async function deleteProject(project: Project) {
     if (!user || saving) return
 
+    const linkedTaskCount = taskCounts[project.id]?.total ?? 0
+    if (linkedTaskCount > 0) {
+      setError(`"${project.name}" has ${linkedTaskCount} linked task${linkedTaskCount === 1 ? '' : 's'}. Archive it to preserve the tasks.`)
+      return
+    }
+
     const confirmed = window.confirm(
-      `Delete "${project.name}"? This action cannot be undone.`
+      `Permanently delete "${project.name}"? This cannot be undone.`
     )
 
     if (!confirmed) return
@@ -286,19 +325,14 @@ function Projects() {
     } else {
       setProjects(current => current.filter(item => item.id !== project.id))
 
-      const { error: notificationError } = await supabase
-        .from('notifications')
-        .insert({
-          user_id: user.id,
-          title: 'Project deleted',
-          message: `${project.name} was removed from your workspace.`,
-          type: 'project',
-          link: '/projects',
-        })
-
-      if (notificationError) {
-        console.error('Project notification failed:', notificationError.message)
-      }
+      const notificationError = await createWorkspaceNotification({
+        userId: user.id,
+        title: 'Project deleted',
+        message: `${project.name} was removed from your workspace.`,
+        type: 'project',
+        link: '/projects',
+      })
+      if (notificationError) setError(`Project deleted, but its notification could not be saved: ${notificationError}`)
     }
 
     setSaving(false)
@@ -312,7 +346,10 @@ function Projects() {
           <h1>Projects</h1>
           <p>Manage your projects and keep every milestone on track.</p>
         </div>
-        <button className="workspace-primary" onClick={() => setShowForm(!showForm)}>
+        <button
+          className="workspace-primary"
+          onClick={() => showForm ? closeCreateForm() : setCreateFormOpen(true)}
+        >
           <Plus size={17} /> New project
         </button>
       </div>
@@ -320,15 +357,23 @@ function Projects() {
       {showForm && (
         <div className="workspace-form">
           <input
+            aria-label="Project name"
             value={newName}
             onChange={event => setNewName(event.target.value)}
             onKeyDown={event => event.key === 'Enter' && addProject()}
             placeholder="Enter project name..."
           />
+          <textarea
+            aria-label="Project description"
+            value={newDescription}
+            onChange={event => setNewDescription(event.target.value)}
+            placeholder="Describe this project (optional)"
+            rows={2}
+          />
           <button onClick={addProject} disabled={saving}>
             {saving ? 'Saving...' : 'Create project'}
           </button>
-          <button className="workspace-cancel" onClick={() => setShowForm(false)}>
+          <button className="workspace-cancel" onClick={closeCreateForm}>
             Cancel
           </button>
         </div>
@@ -339,15 +384,15 @@ function Projects() {
       <div className="workspace-stats">
         <div className="workspace-stat">
           <span>Total projects</span>
-          <strong>{projects.length}</strong>
+          <strong>{projects.filter(project => !project.archived_at && project.status !== 'Archived').length}</strong>
         </div>
         <div className="workspace-stat">
           <span>In progress</span>
-          <strong>{projects.filter(p => p.status === 'In progress').length}</strong>
+          <strong>{projects.filter(p => !p.archived_at && p.status === 'In progress').length}</strong>
         </div>
         <div className="workspace-stat">
           <span>Completed</span>
-          <strong>{projects.filter(p => p.status === 'Completed').length}</strong>
+          <strong>{projects.filter(p => !p.archived_at && p.status === 'Completed').length}</strong>
         </div>
       </div>
 
@@ -356,13 +401,14 @@ function Projects() {
           <div className="workspace-search">
             <Search size={17} />
             <input
+              aria-label="Search projects"
               value={search}
               onChange={event => setSearch(event.target.value)}
               placeholder="Search projects..."
             />
           </div>
           <div className="workspace-filters">
-            {['All', 'In progress', 'Planning', 'Almost done', 'Completed'].map(item => (
+            {['All', 'In progress', 'Planning', 'Almost done', 'Completed', 'Archived'].map(item => (
               <button
                 key={item}
                 className={filter === item ? 'filter-active' : ''}
@@ -372,6 +418,14 @@ function Projects() {
               </button>
             ))}
           </div>
+          <label className="workspace-sort">
+            <span>Sort by</span>
+            <select value={sortBy} onChange={event => setSortBy(event.target.value as typeof sortBy)}>
+              <option value="recent">Recently created</option>
+              <option value="name">Name</option>
+              <option value="due">Due date</option>
+            </select>
+          </label>
         </div>
 
         {loading ? (
@@ -385,20 +439,23 @@ function Projects() {
                 <article className="workspace-project-card" key={project.id}>
                   {editingId === project.id ? (
                     <div className="project-edit-form">
-                      <label>Project name</label>
+                      <label htmlFor={`project-name-${project.id}`}>Project name</label>
                       <input
+                        id={`project-name-${project.id}`}
                         value={editForm.name}
                         onChange={event => setEditForm({ ...editForm, name: event.target.value })}
                       />
 
-                      <label>Category</label>
+                      <label htmlFor={`project-category-${project.id}`}>Category</label>
                       <input
+                        id={`project-category-${project.id}`}
                         value={editForm.category}
                         onChange={event => setEditForm({ ...editForm, category: event.target.value })}
                       />
 
-                      <label>Status</label>
+                      <label htmlFor={`project-status-${project.id}`}>Status</label>
                       <select
+                        id={`project-status-${project.id}`}
                         value={editForm.status}
                         onChange={event => setEditForm({ ...editForm, status: event.target.value })}
                       >
@@ -408,12 +465,18 @@ function Projects() {
                         <option>Completed</option>
                       </select>
 
-                      <label>
-                        Progress is calculated automatically from completed tasks.
-                      </label>
+                      <label htmlFor={`project-description-${project.id}`}>Description</label>
+                      <textarea
+                        id={`project-description-${project.id}`}
+                        value={editForm.description}
+                        onChange={event => setEditForm({ ...editForm, description: event.target.value })}
+                        rows={3}
+                      />
+                      <small>Progress is calculated automatically from completed tasks.</small>
 
-                      <label>Due date</label>
+                      <label htmlFor={`project-due-${project.id}`}>Due date</label>
                       <input
+                        id={`project-due-${project.id}`}
                         type="date"
                         value={editForm.due}
                         onChange={event => setEditForm({ ...editForm, due: event.target.value })}
@@ -434,10 +497,15 @@ function Projects() {
                         <div className="workspace-project-icon">
                           <FolderKanban size={20} />
                         </div>
-                        <span className="workspace-status">{project.status}</span>
+                        <span className="workspace-status">
+                          {project.archived_at || project.status === 'Archived' ? 'Archived' : project.status}
+                        </span>
                       </div>
                       <span className="workspace-category">{project.category}</span>
                       <h3>{project.name}</h3>
+                      {project.description && (
+                        <p className="workspace-project-description">{project.description}</p>
+                      )}
                       <div className="workspace-progress-meta">
                         <span>{taskCounts[project.id]?.completed ?? 0} of {taskCounts[project.id]?.total ?? 0} tasks completed</span>
                         <strong>{project.progress}%</strong>
@@ -452,13 +520,32 @@ function Projects() {
                         <span><CalendarDays size={13} /> {project.due}</span>
                       </div>
                       <div className="project-card-actions">
+                        <button onClick={() => navigate(`/projects/${project.id}`)}>
+                          <Eye size={15} /> View
+                        </button>
                         <button onClick={() => startEditing(project)} disabled={saving}>
                           <Pencil size={15} /> Edit
                         </button>
                         <button
+                          onClick={() => setProjectArchived(
+                            project,
+                            !(project.archived_at || project.status === 'Archived')
+                          )}
+                          disabled={saving}
+                        >
+                          {project.archived_at || project.status === 'Archived'
+                            ? <><RotateCcw size={15} /> Restore</>
+                            : <><Archive size={15} /> Archive</>}
+                        </button>
+                        <button
                           className="project-delete-button"
                           onClick={() => deleteProject(project)}
-                          disabled={saving}
+                          disabled={saving || (taskCounts[project.id]?.total ?? 0) > 0}
+                          title={
+                            (taskCounts[project.id]?.total ?? 0) > 0
+                              ? 'Archive this project to preserve its linked tasks'
+                              : 'Permanently delete project'
+                          }
                         >
                           <Trash2 size={15} /> Delete
                         </button>

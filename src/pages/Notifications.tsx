@@ -5,7 +5,7 @@ import {
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
-import { useAuth } from '../context/AuthContext'
+import { useAuth } from '../context/useAuth'
 
 type NotificationItem = {
   id: number
@@ -29,6 +29,8 @@ function Notifications() {
   const [filter, setFilter] = useState<FilterType>('all')
 
   useEffect(() => {
+    let active = true
+
     const loadNotifications = async () => {
       if (!user) {
         setLoading(false)
@@ -41,6 +43,8 @@ function Notifications() {
         .eq('user_id', user.id)
         .order('created_at', { ascending: false })
 
+      if (!active) return
+
       if (error) {
         setError(error.message)
       } else {
@@ -50,7 +54,19 @@ function Notifications() {
       setLoading(false)
     }
 
-    loadNotifications()
+    void loadNotifications().catch((loadError: unknown) => {
+      if (!active) return
+      setError(
+        loadError instanceof Error
+          ? loadError.message
+          : 'Could not load notifications.'
+      )
+      setLoading(false)
+    })
+
+    return () => {
+      active = false
+    }
   }, [user])
 
   const unreadCount = notifications.filter(item => !item.is_read).length

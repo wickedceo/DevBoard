@@ -1,11 +1,14 @@
 
 import { useEffect, useState } from 'react'
 import { ChevronLeft, ChevronRight, CalendarDays } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
-import { useAuth } from '../context/AuthContext'
+import { useAuth } from '../context/useAuth'
+import { getLocalDateKey, isDateBeforeToday, parseDateKey } from '../lib/date-utils'
 
 type Task = {
   id: number
+  project_id: number | null
   title: string
   project: string
   status: string
@@ -13,32 +16,73 @@ type Task = {
   due: string
 }
 
+type Project = {
+  id: number
+  name: string
+  status: string
+  due: string
+}
+
+type CalendarEvent = {
+  id: string
+  title: string
+  date: string
+  kind: 'task' | 'project'
+  status: string
+  priority?: string
+  projectId?: number
+}
+
 function Calendar() {
   const { user } = useAuth()
+  const navigate = useNavigate()
   const [tasks, setTasks] = useState<Task[]>([])
+  const [projects, setProjects] = useState<Project[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [currentDate, setCurrentDate] = useState(new Date())
 
   useEffect(() => {
+    let active = true
+
     async function loadTasks() {
-      if (!user) return
+      if (!user) {
+        setLoading(false)
+        return
+      }
 
-      const { data, error } = await supabase
-        .from('tasks')
-        .select('*')
-        .eq('user_id', user.id)
+      const [taskResult, projectResult] = await Promise.all([
+        supabase
+          .from('tasks')
+          .select('id,project_id,title,project,status,priority,due')
+          .eq('user_id', user.id),
+        supabase
+          .from('projects')
+          .select('id,name,status,due')
+          .eq('user_id', user.id),
+      ])
 
-      if (error) {
-        setError(error.message)
+      if (!active) return
+
+      if (taskResult.error || projectResult.error) {
+        setError(taskResult.error?.message ?? projectResult.error?.message ?? 'Could not load your schedule.')
       } else {
-        setTasks(data || [])
+        setTasks((taskResult.data ?? []) as Task[])
+        setProjects((projectResult.data ?? []) as Project[])
       }
 
       setLoading(false)
     }
 
-    loadTasks()
+    void loadTasks().catch((loadError: unknown) => {
+      if (!active) return
+      setError(loadError instanceof Error ? loadError.message : 'Could not load your schedule.')
+      setLoading(false)
+    })
+
+    return () => {
+      active = false
+    }
   }, [user])
 
   const year = currentDate.getFullYear()
@@ -46,6 +90,7 @@ function Calendar() {
   const firstDay = new Date(year, month, 1).getDay()
   const daysInMonth = new Date(year, month + 1, 0).getDate()
   const today = new Date()
+  const todayKey = getLocalDateKey(today)
 
   const monthName = currentDate.toLocaleDateString('en', {
     month: 'long',
@@ -56,15 +101,34 @@ function Calendar() {
     setCurrentDate(new Date(year, month + amount, 1))
   }
 
-  const selectedMonthTasks = tasks.filter(task => {
-    if (!task.due) return false
-    const date = new Date(`${task.due}T00:00:00`)
-    return date.getFullYear() === year && date.getMonth() === month
-  })
+  const events: CalendarEvent[] = [
+    ...tasks.map(task => ({
+      id: `task-${task.id}`,
+      title: task.title,
+      date: task.due,
+      kind: 'task' as const,
+      status: task.status,
+      priority: task.priority,
+      projectId: task.project_id ?? undefined,
+    })),
+    ...projects.map(project => ({
+      id: `project-${project.id}`,
+      title: project.name,
+      date: project.due,
+      kind: 'project' as const,
+      status: project.status,
+      projectId: project.id,
+    })),
+  ]
 
-  const upcomingTasks = [...selectedMonthTasks].sort(
-    (a, b) => a.due.localeCompare(b.due)
-  )
+  const selectedMonthEvents = events
+    .filter(event => {
+      const key = parseDateKey(event.date)
+      return key !== null && key.startsWith(`${year}-${String(month + 1).padStart(2, '0')}`)
+    })
+    .sort(
+      (a, b) => (parseDateKey(a.date) ?? '').localeCompare(parseDateKey(b.date) ?? '')
+    )
 
   return (
     <div className="workspace-page">
@@ -107,22 +171,29 @@ function Calendar() {
             {Array.from({ length: daysInMonth }, (_, index) => {
               const day = index + 1
               const dateKey = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
-              const dayTasks = tasks.filter(task => task.due === dateKey)
-              const isToday =
-                today.getFullYear() === year &&
-                today.getMonth() === month &&
-                today.getDate() === day
+              const dayEvents = selectedMonthEvents.filter(event => parseDateKey(event.date) === dateKey)
+              const isToday = dateKey === todayKey
 
               return (
                 <div className={`calendar-day ${isToday ? 'calendar-today' : ''}`} key={day}>
                   <span className="calendar-day-number">{day}</span>
-                  {dayTasks.slice(0, 2).map(task => (
-                    <div className="calendar-event" key={task.id} title={task.title}>
-                      {task.title}
-                    </div>
+                  {dayEvents.slice(0, 2).map(event => (
+                    <button
+                      type="button"
+                      className={`calendar-event ${event.kind === 'project' ? 'calendar-project-event' : ''} ${event.status === 'Completed' ? 'calendar-completed-event' : ''} ${isDateBeforeToday(event.date, today) && event.status !== 'Completed' ? 'calendar-overdue-event' : ''}`}
+                      key={event.id}
+                      title={`${event.kind === 'project' ? 'Project' : 'Task'}: ${event.title}`}
+                      onClick={() => navigate(
+                        event.kind === 'project'
+                          ? `/projects/${event.projectId}`
+                          : `/tasks?search=${encodeURIComponent(event.title)}`
+                      )}
+                    >
+                      {event.kind === 'project' ? 'Project · ' : ''}{event.title}
+                    </button>
                   ))}
-                  {dayTasks.length > 2 && (
-                    <small>+{dayTasks.length - 2} more</small>
+                  {dayEvents.length > 2 && (
+                    <small>+{dayEvents.length - 2} more</small>
                   )}
                 </div>
               )
@@ -137,28 +208,44 @@ function Calendar() {
           <div className="calendar-upcoming-heading">
             <CalendarDays size={19} />
             <div>
-              <strong>Upcoming deadlines</strong>
-              <span>{upcomingTasks.length} tasks this month</span>
+              <strong>Deadlines this month</strong>
+              <span>{selectedMonthEvents.length} project and task deadlines</span>
             </div>
           </div>
 
-          {upcomingTasks.length === 0 ? (
+          {selectedMonthEvents.length === 0 ? (
             <div className="workspace-empty">
               <strong>No deadlines this month</strong>
               <span>Tasks with due dates will appear here.</span>
             </div>
           ) : (
             <div className="calendar-task-list">
-              {upcomingTasks.map(task => (
-                <article className="calendar-task" key={task.id}>
+              {selectedMonthEvents.map(event => (
+                <button
+                  type="button"
+                  className={`calendar-task ${isDateBeforeToday(event.date, today) && event.status !== 'Completed' ? 'calendar-task-overdue' : ''}`}
+                  key={event.id}
+                  onClick={() => navigate(
+                    event.kind === 'project'
+                      ? `/projects/${event.projectId}`
+                      : `/tasks?search=${encodeURIComponent(event.title)}`
+                  )}
+                >
                   <div>
-                    <strong>{task.title}</strong>
-                    <span>{task.project || 'General'} · {task.due}</span>
+                    <strong>{event.kind === 'project' ? 'Project · ' : ''}{event.title}</strong>
+                    <span>
+                      {event.kind === 'task' && event.projectId
+                        ? projects.find(project => project.id === event.projectId)?.name ?? 'General'
+                        : event.kind === 'task' ? 'General' : event.status}
+                      {' · '}{event.date}
+                    </span>
                   </div>
-                  <span className={`task-priority priority-${task.priority.toLowerCase()}`}>
-                    {task.priority}
-                  </span>
-                </article>
+                  {event.priority && (
+                    <span className={`task-priority priority-${event.priority.toLowerCase()}`}>
+                      {event.priority}
+                    </span>
+                  )}
+                </button>
               ))}
             </div>
           )}
