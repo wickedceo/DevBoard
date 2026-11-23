@@ -173,24 +173,31 @@ function Projects() {
     setSaving(true)
     setError('')
 
-    const { data, error: insertError } = await supabase
-      .from('projects')
-      .insert({
-        user_id: user.id,
-        name: newName.trim(),
-        category: 'New project',
-        progress: 0,
-        status: 'Planning',
-        due: 'Not scheduled',
-        description: newDescription.trim(),
-        archived_at: null,
-      })
-      .select()
-      .single()
+    try {
+      const { data, error: insertError } = await supabase
+        .from('projects')
+        .insert({
+          user_id: user.id,
+          name: newName.trim(),
+          category: 'New project',
+          progress: 0,
+          status: 'Planning',
+          due: 'Not scheduled',
+          description: newDescription.trim(),
+          archived_at: null,
+        })
+        .select()
+        .single()
 
-    if (insertError) {
-      setError(insertError.message)
-    } else if (data) {
+      if (insertError) {
+        setError(insertError.message)
+        return
+      }
+      if (!data) {
+        setError('The project was not returned after saving. Please refresh and try again.')
+        return
+      }
+
       setProjects(current => [data, ...current])
       setNewName('')
       setNewDescription('')
@@ -203,10 +210,14 @@ function Projects() {
         type: 'project',
         link: '/projects',
       })
-      if (notificationError) setError(`Project saved, but its notification could not be saved: ${notificationError}`)
+      if (notificationError) {
+        setError(`Project saved, but its notification could not be saved: ${notificationError}`)
+      }
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Could not create project.')
+    } finally {
+      setSaving(false)
     }
-
-    setSaving(false)
   }
 
   function startEditing(project: Project) {
@@ -227,29 +238,37 @@ function Projects() {
     setSaving(true)
     setError('')
 
-    const { data, error: updateError } = await supabase
-      .from('projects')
-      .update({
-        name: editForm.name.trim(),
-        category: editForm.category.trim() || 'General',
-        status: editForm.status,
-        due: editForm.due.trim() || 'Not scheduled',
-        description: editForm.description.trim(),
-      })
-      .eq('id', editingId)
-      .eq('user_id', user.id)
-      .select()
-      .single()
+    try {
+      const { data, error: updateError } = await supabase
+        .from('projects')
+        .update({
+          name: editForm.name.trim(),
+          category: editForm.category.trim() || 'General',
+          status: editForm.status,
+          due: editForm.due.trim() || 'Not scheduled',
+          description: editForm.description.trim(),
+        })
+        .eq('id', editingId)
+        .eq('user_id', user.id)
+        .select()
+        .single()
 
-    if (updateError) {
-      setError(updateError.message)
-    } else if (data) {
+      if (updateError) {
+        setError(updateError.message)
+        return
+      }
+      if (!data) {
+        setError('The project was not returned after saving. It may have been removed.')
+        return
+      }
+
       setProjects(current => current.map(project =>
         project.id === editingId
           ? { ...data, progress: project.progress }
           : project
       ))
       setEditingId(null)
+
       const notificationError = await createWorkspaceNotification({
         userId: user.id,
         title: 'Project updated',
@@ -257,10 +276,14 @@ function Projects() {
         type: 'project',
         link: `/projects/${data.id}`,
       })
-      if (notificationError) setError(`Project saved, but its notification could not be saved: ${notificationError}`)
+      if (notificationError) {
+        setError(`Project saved, but its notification could not be saved: ${notificationError}`)
+      }
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Could not update project.')
+    } finally {
+      setSaving(false)
     }
-
-    setSaving(false)
   }
 
   async function setProjectArchived(project: Project, archived: boolean) {
@@ -269,20 +292,30 @@ function Projects() {
     setSaving(true)
     setError('')
 
-    const archivedAt = archived ? new Date().toISOString() : null
-    const status = !archived && project.status === 'Archived' ? 'Planning' : project.status
-    const { error: updateError } = await supabase
-      .from('projects')
-      .update({ archived_at: archivedAt, status })
-      .eq('id', project.id)
-      .eq('user_id', user.id)
+    try {
+      const archivedAt = archived ? new Date().toISOString() : null
+      const status = !archived && project.status === 'Archived' ? 'Planning' : project.status
+      const { data, error: updateError } = await supabase
+        .from('projects')
+        .update({ archived_at: archivedAt, status })
+        .eq('id', project.id)
+        .eq('user_id', user.id)
+        .select('id')
+        .single()
 
-    if (updateError) {
-      setError(updateError.message)
-    } else {
+      if (updateError) {
+        setError(updateError.message)
+        return
+      }
+      if (!data) {
+        setError('The project was not returned after updating. It may have been removed.')
+        return
+      }
+
       setProjects(current => current.map(item =>
         item.id === project.id ? { ...item, archived_at: archivedAt, status } : item
       ))
+
       const notificationError = await createWorkspaceNotification({
         userId: user.id,
         title: archived ? 'Project archived' : 'Project restored',
@@ -290,10 +323,14 @@ function Projects() {
         type: 'project',
         link: `/projects/${project.id}`,
       })
-      if (notificationError) setError(`Project updated, but its notification could not be saved: ${notificationError}`)
+      if (notificationError) {
+        setError(`Project updated, but its notification could not be saved: ${notificationError}`)
+      }
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Could not update project archive status.')
+    } finally {
+      setSaving(false)
     }
-
-    setSaving(false)
   }
 
   async function deleteProject(project: Project) {
@@ -314,15 +351,39 @@ function Projects() {
     setSaving(true)
     setError('')
 
-    const { error: deleteError } = await supabase
-      .from('projects')
-      .delete()
-      .eq('id', project.id)
-      .eq('user_id', user.id)
+    try {
+      const { count, error: tasksError } = await supabase
+        .from('tasks')
+        .select('id', { count: 'exact', head: true })
+        .eq('project_id', project.id)
+        .eq('user_id', user.id)
 
-    if (deleteError) {
-      setError(deleteError.message)
-    } else {
+      if (tasksError) {
+        setError(`Could not verify linked tasks: ${tasksError.message}`)
+        return
+      }
+      if ((count ?? 0) > 0) {
+        setError(`"${project.name}" has ${count} linked task${count === 1 ? '' : 's'}. Archive it to preserve the tasks.`)
+        return
+      }
+
+      const { data, error: deleteError } = await supabase
+        .from('projects')
+        .delete()
+        .eq('id', project.id)
+        .eq('user_id', user.id)
+        .select('id')
+        .single()
+
+      if (deleteError) {
+        setError(deleteError.message)
+        return
+      }
+      if (!data) {
+        setError('The project was not returned after deletion. Refresh the list and try again.')
+        return
+      }
+
       setProjects(current => current.filter(item => item.id !== project.id))
 
       const notificationError = await createWorkspaceNotification({
@@ -332,10 +393,14 @@ function Projects() {
         type: 'project',
         link: '/projects',
       })
-      if (notificationError) setError(`Project deleted, but its notification could not be saved: ${notificationError}`)
+      if (notificationError) {
+        setError(`Project deleted, but its notification could not be saved: ${notificationError}`)
+      }
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Could not delete project.')
+    } finally {
+      setSaving(false)
     }
-
-    setSaving(false)
   }
 
   return (
