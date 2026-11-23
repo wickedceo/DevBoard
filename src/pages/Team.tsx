@@ -16,6 +16,7 @@ type Member = {
 function Team() {
   const { user } = useAuth()
   const [members, setMembers] = useState<Member[]>([])
+  const [membersUserId, setMembersUserId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -34,9 +35,6 @@ function Team() {
     let cancelled = false
 
     async function loadMembers() {
-      setLoading(true)
-      setError('')
-
       const { data, error: fetchError } = await supabase
         .from('team_members')
         .select('*')
@@ -47,17 +45,13 @@ function Team() {
 
       if (fetchError) {
         setError(fetchError.message)
-        setLoading(false)
-        return
+        setMembers([])
+      } else {
+        setMembers((data ?? []) as Member[])
+        setError('')
       }
 
-      if (data && data.length > 0) {
-        setMembers(data as Member[])
-        setLoading(false)
-        return
-      }
-
-      setMembers([])
+      setMembersUserId(currentUser.id)
       setLoading(false)
     }
 
@@ -68,6 +62,8 @@ function Team() {
           ? loadError.message
           : 'Could not load team members.'
       )
+      setMembers([])
+      setMembersUserId(currentUser.id)
       setLoading(false)
     })
 
@@ -76,13 +72,21 @@ function Team() {
     }
   }, [user])
 
-  const filteredMembers = useMemo(() => members.filter(member => {
+  const visibleMembers = useMemo(
+  () => user && membersUserId === user.id ? members : [],
+  [user, membersUserId, members]
+)
+
+  const isLoading =
+    Boolean(user) && (loading || membersUserId !== user?.id)
+
+  const filteredMembers = useMemo(() => visibleMembers.filter(member => {
     const matchesSearch =
       member.name.toLowerCase().includes(search.toLowerCase()) ||
       member.email.toLowerCase().includes(search.toLowerCase())
 
     return matchesSearch && (filter === 'All' || member.role === filter)
-  }), [members, search, filter])
+  }), [visibleMembers, search, filter])
 
   function resetMemberForm() {
     setEditingMemberId(null)
@@ -113,66 +117,74 @@ function Team() {
 
   async function saveMember(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (!user || !name.trim() || !email.trim()) return
+    if (!user || !name.trim() || !email.trim() || saving) return
 
     setSaving(true)
     setError('')
 
     const cleanName = name.trim()
 
-    if (editingMemberId !== null) {
-      const { data, error: updateError } = await supabase
-        .from('team_members')
-        .update({
-          name: cleanName,
-          email: email.trim(),
-          role,
-          initials: cleanName.split(' ').map(part => part[0]).join('').slice(0, 2).toUpperCase(),
-        })
-        .eq('id', editingMemberId)
-        .eq('user_id', user.id)
-        .select()
-        .single()
+    try {
+      if (editingMemberId !== null) {
+        const { data, error: updateError } = await supabase
+          .from('team_members')
+          .update({
+            name: cleanName,
+            email: email.trim(),
+            role,
+            initials: cleanName.split(' ').map(part => part[0]).join('').slice(0, 2).toUpperCase(),
+          })
+          .eq('id', editingMemberId)
+          .eq('user_id', user.id)
+          .select()
+          .single()
 
-      if (updateError) {
-        setError(updateError.message)
-        setSaving(false)
-        return
+        if (updateError) {
+          setError(updateError.message)
+          return
+        }
+        if (!data) {
+          setError('The contact was not returned after saving. It may have been removed.')
+          return
+        }
+
+        setMembers(current => current.map(member =>
+          member.id === editingMemberId ? data as Member : member
+        ))
+      } else {
+        const { data, error: insertError } = await supabase
+          .from('team_members')
+          .insert({
+            user_id: user.id,
+            name: cleanName,
+            email: email.trim(),
+            role,
+            status: 'Offline',
+            initials: cleanName.split(' ').map(part => part[0]).join('').slice(0, 2).toUpperCase(),
+            color: '#c5a46d',
+          })
+          .select()
+          .single()
+
+        if (insertError) {
+          setError(insertError.message)
+          return
+        }
+        if (!data) {
+          setError('The contact was not returned after saving. Please refresh and try again.')
+          return
+        }
+
+        setMembers(current => [...current, data as Member])
       }
 
-      setMembers(current => current.map(member =>
-        member.id === editingMemberId ? data as Member : member
-      ))
       setShowForm(false)
       resetMemberForm()
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : 'Could not save the contact.')
+    } finally {
       setSaving(false)
-      return
     }
-
-    const { data, error: insertError } = await supabase
-      .from('team_members')
-      .insert({
-        user_id: user.id,
-        name: cleanName,
-        email: email.trim(),
-        role,
-        status: 'Offline',
-        initials: cleanName.split(' ').map(part => part[0]).join('').slice(0, 2).toUpperCase(),
-        color: '#c5a46d',
-      })
-      .select()
-      .single()
-
-    if (insertError) {
-      setError(insertError.message)
-      setSaving(false)
-      return
-    }
-
-    setMembers(current => [...current, data as Member])
-    setShowForm(false)
-    resetMemberForm()
-    setSaving(false)
   }
 
   async function removeMember(id: number) {
@@ -181,24 +193,34 @@ function Team() {
     setSaving(true)
     setError('')
 
-    const { error: deleteError } = await supabase
-      .from('team_members')
-      .delete()
-      .eq('id', id)
-      .eq('user_id', user.id)
+    try {
+      const { data, error: deleteError } = await supabase
+        .from('team_members')
+        .delete()
+        .eq('id', id)
+        .eq('user_id', user.id)
+        .select('id')
+        .single()
 
-    if (deleteError) {
-      setError(deleteError.message)
+      if (deleteError) {
+        setError(deleteError.message)
+        return
+      }
+      if (!data) {
+        setError('The contact was not returned after removal. Refresh the directory and try again.')
+        return
+      }
+
+      setMembers(current => current.filter(member => member.id !== id))
+      if (editingMemberId === id) {
+        setShowForm(false)
+        resetMemberForm()
+      }
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : 'Could not remove the contact.')
+    } finally {
       setSaving(false)
-      return
     }
-
-    setMembers(current => current.filter(member => member.id !== id))
-    if (editingMemberId === id) {
-      setShowForm(false)
-      resetMemberForm()
-    }
-    setSaving(false)
   }
 
   return (
@@ -217,7 +239,7 @@ function Team() {
       <div className="workspace-stats">
         <div className="workspace-stat">
         <span>Directory records</span>
-          <strong>{members.length}</strong>
+          <strong>{visibleMembers.length}</strong>
         </div>
         <div className="workspace-stat">
         <span>Developers</span>
@@ -276,7 +298,7 @@ function Team() {
           </div>
         </div>
 
-        {loading ? (
+        {isLoading ? (
           <div className="workspace-empty">Loading team members...</div>
         ) : (
           <>

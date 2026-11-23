@@ -1,40 +1,31 @@
 import { supabase } from './supabase'
+import {
+  createWorkspaceNotificationWithStore,
+  type NotificationInput,
+  type WorkspaceNotificationStore,
+} from './workspace-notification-flow'
 
-type NotificationInput = {
-  userId: string
-  title: string
-  message: string
-  type: string
-  link: string
-}
-
-export async function createWorkspaceNotification({
-  userId,
-  title,
-  message,
-  type,
-  link,
-}: NotificationInput): Promise<string | null> {
-  try {
-    const { data: settings, error: settingsError } = await supabase
+const supabaseNotificationStore: WorkspaceNotificationStore = {
+  async getNotificationPreference(userId) {
+    const { data, error } = await supabase
       .from('user_settings')
       .select('notifications')
       .eq('user_id', userId)
       .maybeSingle()
 
-    if (settingsError) return settingsError.message
-    if (settings?.notifications === false) return null
+    return {
+      enabled: data?.notifications ?? null,
+      error: error?.message ?? null,
+    }
+  },
+  async insertNotification(notification) {
+    const { error } = await supabase.from('notifications').insert(notification)
+    return { error: error?.message ?? null }
+  },
+}
 
-    const { error } = await supabase.from('notifications').insert({
-      user_id: userId,
-      title,
-      message,
-      type,
-      link,
-    })
-
-    return error?.message ?? null
-  } catch (error) {
-    return error instanceof Error ? error.message : 'Unknown notification error.'
-  }
+export function createWorkspaceNotification(
+  notification: NotificationInput,
+): Promise<string | null> {
+  return createWorkspaceNotificationWithStore(notification, supabaseNotificationStore)
 }

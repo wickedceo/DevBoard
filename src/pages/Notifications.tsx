@@ -25,6 +25,7 @@ function Notifications() {
 
   const [notifications, setNotifications] = useState<NotificationItem[]>([])
   const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [filter, setFilter] = useState<FilterType>('all')
 
@@ -78,61 +79,100 @@ function Notifications() {
     return notifications
   }, [notifications, filter])
 
-  const markAsRead = async (id: number) => {
-    if (!user) return
+  const markAsRead = async (id: number): Promise<boolean> => {
+    if (!user || saving) return false
 
-    const { error } = await supabase
-      .from('notifications')
-      .update({ is_read: true })
-      .eq('id', id)
-      .eq('user_id', user.id)
+    setSaving(true)
+    setError('')
+    try {
+      const { data, error: updateError } = await supabase
+        .from('notifications')
+        .update({ is_read: true })
+        .eq('id', id)
+        .eq('user_id', user.id)
+        .select('id')
+        .single()
 
-    if (error) {
-      setError(error.message)
-      return
+      if (updateError) {
+        setError(updateError.message)
+        return false
+      }
+      if (!data) {
+        setError('This notification is no longer available. Refresh your inbox and try again.')
+        return false
+      }
+
+      setNotifications(items =>
+        items.map(item => item.id === id ? { ...item, is_read: true } : item)
+      )
+      return true
+    } catch (updateError) {
+      setError(updateError instanceof Error ? updateError.message : 'Could not mark the notification as read.')
+      return false
+    } finally {
+      setSaving(false)
     }
-
-    setNotifications(items =>
-      items.map(item => item.id === id ? { ...item, is_read: true } : item)
-    )
   }
 
   const markAllAsRead = async () => {
-    if (!user || unreadCount === 0) return
+    if (!user || saving || unreadCount === 0) return
 
-    const { error } = await supabase
-      .from('notifications')
-      .update({ is_read: true })
-      .eq('user_id', user.id)
-      .eq('is_read', false)
+    setSaving(true)
+    setError('')
+    try {
+      const { error: updateError } = await supabase
+        .from('notifications')
+        .update({ is_read: true })
+        .eq('user_id', user.id)
+        .eq('is_read', false)
+        .select('id')
 
-    if (error) {
-      setError(error.message)
-      return
+      if (updateError) {
+        setError(updateError.message)
+        return
+      }
+
+      setNotifications(items => items.map(item => ({ ...item, is_read: true })))
+    } catch (updateError) {
+      setError(updateError instanceof Error ? updateError.message : 'Could not mark notifications as read.')
+    } finally {
+      setSaving(false)
     }
-
-    setNotifications(items => items.map(item => ({ ...item, is_read: true })))
   }
 
   const deleteNotification = async (id: number) => {
-    if (!user) return
+    if (!user || saving) return
 
-    const { error } = await supabase
-      .from('notifications')
-      .delete()
-      .eq('id', id)
-      .eq('user_id', user.id)
+    setSaving(true)
+    setError('')
+    try {
+      const { data, error: deleteError } = await supabase
+        .from('notifications')
+        .delete()
+        .eq('id', id)
+        .eq('user_id', user.id)
+        .select('id')
+        .single()
 
-    if (error) {
-      setError(error.message)
-      return
+      if (deleteError) {
+        setError(deleteError.message)
+        return
+      }
+      if (!data) {
+        setError('This notification is no longer available. Refresh your inbox and try again.')
+        return
+      }
+
+      setNotifications(items => items.filter(item => item.id !== id))
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : 'Could not delete the notification.')
+    } finally {
+      setSaving(false)
     }
-
-    setNotifications(items => items.filter(item => item.id !== id))
   }
 
   const openNotification = async (item: NotificationItem) => {
-    if (!item.is_read) await markAsRead(item.id)
+    if (!item.is_read && !(await markAsRead(item.id))) return
     if (item.link) navigate(item.link)
   }
 
@@ -187,7 +227,7 @@ function Notifications() {
         </div>
 
         {unreadCount > 0 && (
-          <button className="notifications-v2-mark" onClick={markAllAsRead}>
+          <button className="notifications-v2-mark" onClick={markAllAsRead} disabled={saving}>
             <CheckCheck size={16} />
             Mark all as read
           </button>
@@ -232,7 +272,7 @@ function Notifications() {
         </div>
       </section>
 
-      {error && <div className="notifications-v2-error">{error}</div>}
+      {error && <div className="notifications-v2-error" role="alert">{error}</div>}
 
       <section className="notifications-v2-feed">
         <div className="notifications-v2-feed-header">
@@ -247,6 +287,7 @@ function Notifications() {
                 key={item}
                 className={filter === item ? 'active' : ''}
                 onClick={() => setFilter(item)}
+                disabled={saving}
               >
                 {item.charAt(0).toUpperCase() + item.slice(1)}
                 <span>
@@ -290,6 +331,7 @@ function Notifications() {
                 <button
                   className="notifications-v2-item-body"
                   onClick={() => openNotification(item)}
+                  disabled={saving}
                 >
                   <div className="notifications-v2-item-meta">
                     <span>{getTypeLabel(item.type)}</span>
@@ -307,6 +349,7 @@ function Notifications() {
                   {!item.is_read && (
                     <button
                       onClick={() => markAsRead(item.id)}
+                      disabled={saving}
                       aria-label="Mark as read"
                       title="Mark as read"
                     >
@@ -315,6 +358,7 @@ function Notifications() {
                   )}
                   <button
                     onClick={() => deleteNotification(item.id)}
+                    disabled={saving}
                     aria-label="Delete notification"
                     title="Delete notification"
                     className="delete"

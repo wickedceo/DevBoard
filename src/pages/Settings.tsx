@@ -83,6 +83,8 @@ function Settings() {
           setName(newSettings.full_name)
           setNotifications(newSettings.notifications)
           setUpdates(newSettings.updates)
+        } else {
+          setError('Settings were not returned after initialization. Refresh and try again.')
         }
       }
 
@@ -107,6 +109,7 @@ function Settings() {
   async function saveSettings() {
     const currentUser = user
 
+    if (saving) return
     if (!currentUser) {
       setError('Please sign in again to save your settings.')
       return
@@ -117,7 +120,7 @@ function Settings() {
     setError('')
 
     try {
-      const { error: saveError } = await supabase
+      const { data, error: saveError } = await supabase
         .from('user_settings')
         .upsert({
           user_id: currentUser.id,
@@ -128,8 +131,13 @@ function Settings() {
           updates,
           updated_at: new Date().toISOString()
         }, { onConflict: 'user_id' })
+        .select('user_id')
+        .single()
 
       if (saveError) throw saveError
+      if (!data || data.user_id !== currentUser.id) {
+        throw new Error('Settings were not confirmed as saved. Please refresh and try again.')
+      }
       setSaved(true)
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : 'Could not save settings.')
@@ -140,7 +148,13 @@ function Settings() {
 
   async function changePassword(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (passwordSaving) return
     setPasswordMessage('')
+
+    if (!user) {
+      setPasswordMessage('Please sign in again to update your password.')
+      return
+    }
 
     if (newPassword.length < 8) {
       setPasswordMessage('Use at least 8 characters for your new password.')

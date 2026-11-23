@@ -165,25 +165,32 @@ function Tasks() {
       project => String(project.id) === newProjectId
     )
 
-    const { data, error: insertError } = await supabase
-      .from('tasks')
-      .insert({
-        user_id: user.id,
-        project_id: selectedProject?.id ?? null,
-        title: newTitle.trim(),
-        project: selectedProject?.name ?? 'General',
-        status: 'To do',
-        priority: newPriority,
-        due: newDue || 'Not scheduled',
-        description: newDescription.trim(),
-        completed_at: null,
-      })
-      .select()
-      .single()
+    try {
+      const { data, error: insertError } = await supabase
+        .from('tasks')
+        .insert({
+          user_id: user.id,
+          project_id: selectedProject?.id ?? null,
+          title: newTitle.trim(),
+          project: selectedProject?.name ?? 'General',
+          status: 'To do',
+          priority: newPriority,
+          due: newDue || 'Not scheduled',
+          description: newDescription.trim(),
+          completed_at: null,
+        })
+        .select()
+        .single()
 
-    if (insertError) {
-      setError(insertError.message)
-    } else {
+      if (insertError) {
+        setError(insertError.message)
+        return
+      }
+      if (!data) {
+        setError('The task was not returned after saving. Please refresh and try again.')
+        return
+      }
+
       setTasks(current => [data as Task, ...current])
       const notificationError = await createWorkspaceNotification({
         userId: user.id,
@@ -199,9 +206,11 @@ function Tasks() {
       setNewDue('')
       setNewDescription('')
       setShowForm(false)
+    } catch (insertError) {
+      setError(insertError instanceof Error ? insertError.message : 'Could not create task.')
+    } finally {
+      setSaving(false)
     }
-
-    setSaving(false)
   }
 
   function startEditing(task: Task) {
@@ -258,34 +267,43 @@ function Tasks() {
         : null,
     }
 
-    const { error: updateError } = await supabase
-      .from('tasks')
-      .update(updates)
-      .eq('id', editingTaskId)
-      .eq('user_id', user.id)
+    try {
+      const { data, error: updateError } = await supabase
+        .from('tasks')
+        .update(updates)
+        .eq('id', editingTaskId)
+        .eq('user_id', user.id)
+        .select()
+        .single()
 
-    if (updateError) {
-      setError(updateError.message)
-    } else {
+      if (updateError) {
+        setError(updateError.message)
+        return
+      }
+      if (!data) {
+        setError('The task was not returned after saving. It may have been removed.')
+        return
+      }
+
       setTasks(current =>
-        current.map(item =>
-          item.id === editingTaskId ? { ...item, ...updates } : item
-        )
+        current.map(item => item.id === editingTaskId ? data as Task : item)
       )
 
       const notificationError = await createWorkspaceNotification({
         userId: user.id,
         title: 'Task updated',
-        message: `"${updates.title}" was updated successfully.`,
+        message: `"${data.title}" was updated successfully.`,
         type: 'task',
         link: '/tasks',
       })
       if (notificationError) setError(`Task saved, but its notification could not be saved: ${notificationError}`)
 
       cancelEditing()
+    } catch (updateError) {
+      setError(updateError instanceof Error ? updateError.message : 'Could not update task.')
+    } finally {
+      setSaving(false)
     }
-
-    setSaving(false)
   }
 
   async function toggleTask(id: number) {
@@ -301,73 +319,89 @@ function Tasks() {
     setSaving(true)
     setError('')
 
-    const { error: updateError } = await supabase
-      .from('tasks')
-      .update({
-        status: nextStatus,
-        completed_at: completedAt,
-      })
-      .eq('id', id)
-      .eq('user_id', user.id)
+    try {
+      const { data, error: updateError } = await supabase
+        .from('tasks')
+        .update({
+          status: nextStatus,
+          completed_at: completedAt,
+        })
+        .eq('id', id)
+        .eq('user_id', user.id)
+        .select()
+        .single()
 
-    if (updateError) {
-      setError(updateError.message)
-    } else {
+      if (updateError) {
+        setError(updateError.message)
+        return
+      }
+      if (!data) {
+        setError('The task was not returned after updating. It may have been removed.')
+        return
+      }
+
       setTasks(current =>
-        current.map(item =>
-          item.id === id
-            ? {
-                ...item,
-                status: nextStatus,
-                completed_at: completedAt,
-              }
-            : item
-        )
+        current.map(item => item.id === id ? data as Task : item)
       )
       const notificationError = await createWorkspaceNotification({
         userId: user.id,
         title: nextStatus === 'Completed' ? 'Task completed' : 'Task reopened',
-        message: `"${task.title}" was marked as ${nextStatus.toLowerCase()}.`,
+        message: `"${data.title}" was marked as ${data.status.toLowerCase()}.`,
         type: 'task',
         link: '/tasks',
       })
       if (notificationError) setError(`Task saved, but its notification could not be saved: ${notificationError}`)
+    } catch (updateError) {
+      setError(updateError instanceof Error ? updateError.message : 'Could not update task status.')
+    } finally {
+      setSaving(false)
     }
-
-    setSaving(false)
   }
 
   async function deleteTask(id: number) {
     if (!user || saving) return
 
+    const deletedTask = tasks.find(task => task.id === id)
+    if (!deletedTask) {
+      setError('This task is no longer available. Refresh the list and try again.')
+      return
+    }
+
     setSaving(true)
     setError('')
 
-    const { error: deleteError } = await supabase
-      .from('tasks')
-      .delete()
-      .eq('id', id)
-      .eq('user_id', user.id)
+    try {
+      const { data, error: deleteError } = await supabase
+        .from('tasks')
+        .delete()
+        .eq('id', id)
+        .eq('user_id', user.id)
+        .select('id')
+        .single()
 
-    if (deleteError) {
-      setError(deleteError.message)
-    } else {
-      const deletedTask = tasks.find(task => task.id === id)
-      setTasks(current => current.filter(task => task.id !== id))
-
-      if (deletedTask) {
-        const notificationError = await createWorkspaceNotification({
-          userId: user.id,
-          title: 'Task deleted',
-          message: `"${deletedTask.title}" was removed from your tasks.`,
-          type: 'task',
-          link: '/tasks',
-        })
-        if (notificationError) setError(`Task deleted, but its notification could not be saved: ${notificationError}`)
+      if (deleteError) {
+        setError(deleteError.message)
+        return
       }
-    }
+      if (!data) {
+        setError('The task was not returned after deletion. Refresh the list and try again.')
+        return
+      }
 
-    setSaving(false)
+      setTasks(current => current.filter(task => task.id !== id))
+      const notificationError = await createWorkspaceNotification({
+        userId: user.id,
+        title: 'Task deleted',
+        message: `"${deletedTask.title}" was removed from your tasks.`,
+        type: 'task',
+        link: '/tasks',
+      })
+      if (notificationError) setError(`Task deleted, but its notification could not be saved: ${notificationError}`)
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : 'Could not delete task.')
+    } finally {
+      setSaving(false)
+    }
   }
 
   return (
@@ -407,7 +441,7 @@ function Tasks() {
       </div>
 
       {error && (
-        <div className="workspace-empty">
+        <div className="workspace-empty" role="alert">
           <strong>Something went wrong</strong>
           <span>{error}</span>
         </div>
