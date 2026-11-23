@@ -1,0 +1,75 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap');
+
+:root {
+  --color-app-bg: #0b0d12;
+  --color-surface: #191e27;
+  --color-surface-raised: #202631;
+  --color-surface-inset: #151a22;
+  --color-surface-control: #1b202a;
+  --color-border: #303744;
+  --color-border-subtle: #2b323e;
+  --color-text-primary: #edf0f5;
+  --color-text-secondary: #8992a2;
+  --color-text-muted: #788394;
+  --color-accent: #c5a46d;
+  --color-accent-strong: #d8bd8b;
+  --color-accent-hover: #b39461;
+  --color-success: #7bc7a2;
+  --color-warning: #e1a957;
+  --color-info: #a8b7df;
+  --color-danger: #ed9292;
+  --radius-control: 9px;
+  --radius-card: 14px;
+  --shadow-card: 0 12px 35px rgba(0, 0, 0, .12);
+
+  font-family: 'DM Sans', sans-serif;
+  color: var(--color-text-primary);
+  background: var(--color-app-bg);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-optical-sizing: auto;
+  font-weight: 400;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
